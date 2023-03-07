@@ -417,3 +417,163 @@ def deltadeltact(ct_data, # output of namer
         return ddct_df
     else:
         raise ValueError('foldchange should be True or False')
+  
+# Averager 
+def averager(ct_data):
+    '''Computes average Ct values and errors for sample-primer pairs
+    from namer output'''
+    # Save unique sample-primer pairs
+    uniques = np.unique(ct_data['NamePrim'])
+    
+    avgdf = pd.DataFrame(np.zeros([len(uniques),5]),
+                        columns=['Primer','Name','NamePrim','AvgCt','StdCt'])
+    
+    # Iterate through primer-sample pairs to get averages
+    for i, u in enumerate(uniques):
+        # Subset dataframe
+        subdf = ct_data[ct_data['NamePrim'] == u]
+        
+        # Update sample ID information on average dataframe
+        avgdf.loc[i,'Primer'] = subdf.iloc[0]['Primer']
+        avgdf.loc[i,'Name'] = subdf.iloc[0]['Name']
+        avgdf.loc[i,'NamePrim'] = subdf.iloc[0]['NamePrim']
+        
+        # Calculate averages
+        avgdf.loc[i,'AvgCt'] = np.mean(subdf['Cp'])
+        avgdf.loc[i,'StdCt'] = np.std(subdf['Cp'])
+        
+    return avgdf
+
+# Delta-Delta Ct Analysis
+def deltadeltact(ct_data, # output of namer
+                 housekeeping, # list of housekeeping primers
+                 primers, # list of all primers
+                 exp_ctrl, # dictionary of experimental and control samples
+                 dilution=False, # dilution factor if relevant, enter as dilution object
+                 foldchange=False # whether to output fold change or delta-delta Ct
+                ):
+    '''Performs delta delta Ct analysis on output of namer program'''
+    # Check for dilution
+    if dilution == False:
+        pass
+    else:
+        ct_data['Dilutions'] = [int(i.split(' ')[-1]) for i in ct_data['Name']]
+        ct_data = ct_data[ct_data['Dilutions'] == dilution.dil_rest]
+    
+    # Compute averages 
+    avgdf = averager(ct_data)
+        
+    # Check for appropriate housekeeping controls
+    if len(housekeeping) == 1:
+        ask = input('''Warning: Using only one housekeeping gene severely limits result accuracy.
+                    \n Do you want to proceed? [Y/N]''')
+        
+        if ask == 'Y':
+            print('Proceeding with delta delta Ct analysis.')
+            
+        elif ask == 'N':
+            return print('Analysis canceled.')
+        
+        else:
+            raise ValueError('Please enter Y or N to the warning prompt.')
+        
+    else:
+        pass
+    
+    
+    # Batch together housekeeping genes
+    names = np.unique(avgdf['Name'])
+    
+    for n in names:
+        subdf = avgdf[avgdf['Name']==n]
+        subdf = subdf[subdf['Primer'].isin(housekeeping)]
+
+        errorprop = 0.5 * np.sqrt(np.sum([i**2 for i in subdf['StdCt']]))
+
+        series = pd.Series({'Name':n,
+                           'Primer':'housekeeping',
+                           'AvgCt':np.mean(subdf['AvgCt']),
+                           'StdCt':errorprop
+                               })
+
+        avgdf = pd.concat([avgdf,series.to_frame().T],ignore_index=True)
+        
+    # Calculate delta Ct values (experimental - housekeeping)
+    exp_genes = len(primers) - len(housekeeping)
+    
+    # Make dictionary of empty lists
+    dct_dict = {'Name':[],
+               'Primer':[],
+               'dCt':[],
+               'StdErr':[]}
+    
+    for i, n in enumerate(names):
+        # Subset df and make primer loc-able
+        subdf = avgdf[avgdf['Name']==n]
+        subdf.set_index('Primer',inplace=True)
+        
+        for p in primers:
+            if p in housekeeping:
+                pass
+            else:
+                # Calculate dCt and propagate error
+                dct = subdf.loc[p,'AvgCt'] - subdf.loc['housekeeping','AvgCt']
+                err = np.sqrt(subdf.loc[p,'StdCt']**2 + subdf.loc['housekeeping','StdCt']**2)
+                
+                # Update dictionary
+                dct_dict['Name'].append(n)
+                dct_dict['Primer'].append(p)
+                dct_dict['dCt'].append(dct)
+                dct_dict['StdErr'].append(err)
+                
+    # Convert dictionary to dataframe
+    dct_df = pd.DataFrame(dct_dict)
+    
+    # Set index to nameprim for easy location
+    dct_df['NamePrim'] = dct_df['Name'] + dct_df['Primer']
+    dct_df.set_index('NamePrim',inplace=True)
+    
+    # Collect the names of the primers used
+    dct_prims = np.unique(dct_df['Primer'])
+    
+    # Make dictionary of empty lists
+    ddct_dict = {'Experimental':[],
+                'Control':[],
+                'Primer':[],
+                'ddCt':[],
+                'StdErr':[]}
+    
+    # Calculate delta delta Ct values (experimental dCt - control dCt)
+    for e in exp_ctrl:
+        # Identify control sample
+        c = exp_ctrl[e]
+        
+        # Loop through primers
+        for p in dct_prims:
+            # Identify indices
+            e_prim = e + p
+            c_prim = c + p
+            
+            # Calculate ddCt and propagate error
+            ddct = dct_df.loc[e_prim,'dCt'] - dct_df.loc[c_prim,'dCt']
+            err = np.sqrt(dct_df.loc[e_prim,'StdErr']**2 + dct_df.loc[c_prim,'StdErr']**2)
+            
+            # Update dictionary
+            ddct_dict['Experimental'].append(e)
+            ddct_dict['Control'].append(c)
+            ddct_dict['Primer'].append(p)
+            ddct_dict['ddCt'].append(ddct)
+            ddct_dict['StdErr'].append(err)
+            
+    # Convert dictionary to dataframe
+    ddct_df = pd.DataFrame(ddct_dict)
+    
+    # Return the dataframe
+    if foldchange == False:
+        return ddct_df
+    elif foldchange == True:
+        print('I have not figured out how to properly propagate error for fold change yet')
+        ddct_df['FoldChange'] = 2**(-1 * ddct_df['ddCt'])
+        return ddct_df
+    else:
+        raise ValueError('foldchange should be True or False')
